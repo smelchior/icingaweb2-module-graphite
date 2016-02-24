@@ -34,6 +34,10 @@ class Grapher extends GrapherHook
     protected $iframeWidth = "800px";
     protected $iframeHeight = "700px";
 
+    protected $remoteFetch = false;
+    protected $remoteVerifyPeer = true;
+    protected $remoteVerifyPeerName = true;
+
     protected function init()
     {
         $cfg = Config::module('graphite')->getSection('graphite');
@@ -49,6 +53,9 @@ class Grapher extends GrapherHook
         $this->areaAlpha = $cfg->get('graphite_area_alpha', $this->areaAlpha);
         $this->summarizeInterval = $cfg->get('graphite_summarize_interval', $this->summarizeInterval);
         $this->colorList = $cfg->get('graphite_color_list', $this->colorList);
+        $this->remoteFetch = filter_var($cfg->get('remote_fetch', $this->remoteFetch), FILTER_VALIDATE_BOOLEAN);
+        $this->remoteVerifyPeer = filter_var($cfg->get('remote_verify_peer', $this->remoteVerifyPeer), FILTER_VALIDATE_BOOLEAN);
+        $this->remoteVerifyPeerName = filter_var($cfg->get('remote_verify_peer_name', $this->remoteVerifyPeerName), FILTER_VALIDATE_BOOLEAN);
     }
 
     private function parseGrapherConfig($graphite_vars)
@@ -74,7 +81,6 @@ class Grapher extends GrapherHook
             }
         }
     }
-
     private function getKeysAndLabels($vars)
     {
         if (array_key_exists("graphite_keys", $vars)) {
@@ -114,24 +120,23 @@ class Grapher extends GrapherHook
             ), $this->legacyMode, false, false);
         }
         $target = Macro::resolveMacros($target, array("metric"=>$metric), $this->legacyMode, true, true);
-        $imgUrl = $this->baseUrl . Macro::resolveMacros($this->imageUrlMacro, array(
-            "target" => $target,
-            "areaMode" => $this->areaMode,
-            "areaAlpha" => $this->areaAlpha,
-            "colorList" => $this->colorList
-        ), $this->legacyMode);
-        $largeImgUrl = $this->baseUrl . Macro::resolveMacros($this->largeImageUrlMacro, array(
-            "target" => $target,
-            "areaMode" => $this->areaMode,
-            "areaAlpha" => $this->areaAlpha,
-            "colorList" => $this->colorList
-        ), $this->legacyMode);
-
-        $url = Url::fromPath('graphite', array(
-            'graphite_url' => urlencode($largeImgUrl),
-            'graphite_iframe_w' => urlencode($this->iframeWidth),
-            'graphite_iframe_h' => urlencode($this->iframeHeight)
-        ));
+        
+        $imgUrl = $this->getImgUrl($target);
+        
+        if ($this->remoteFetch) {
+            $imgUrl = $this->inlineImage($imgUrl);
+            $url = Url::fromPath('graphite', array(
+                'graphite_url' => urlencode($target),
+                'graphite_iframe_w' => urlencode($this->iframeWidth),
+                'graphite_iframe_h' => urlencode($this->iframeHeight)
+            ));
+        } else {
+            $url = Url::fromPath('graphite', array(
+                'graphite_url' => urlencode($this->getLargeImgUrl($target)),
+                'graphite_iframe_w' => urlencode($this->iframeWidth),
+                'graphite_iframe_h' => urlencode($this->iframeHeight)
+            ));
+        }
 
         $html = '<a href="%s" title="%s"><img src="%s" alt="%s" width="300" height="120" /></a>';
 
@@ -141,7 +146,7 @@ class Grapher extends GrapherHook
             $metric,
             $imgUrl,
             $metric
-      );
+        );
     }
 
     public function has(MonitoredObject $object)
@@ -156,16 +161,13 @@ class Grapher extends GrapherHook
     public function getPreviewHtml(MonitoredObject $object)
     {
         $object->fetchCustomvars();
-
         if (array_key_exists("graphite", $object->customvars)) {
             $this->parseGrapherConfig($object->customvars["graphite"]);
         }
-
         $this->getKeysAndLabels($object->customvars);
         if (empty($this->graphiteKeys)) {
           $this->getPerfDataKeys($object);
         }
-
         if ($object instanceof Host) {
             $host = $object;
             $service = null;
@@ -175,10 +177,8 @@ class Grapher extends GrapherHook
         } else {
             return '';
         }
-
         $html = "<table class=\"avp newsection\">\n"
                ."<tbody>\n";
-
         for ($key = 0; $key < count($this->graphiteKeys); $key++) {
             $html .= "<tr><th>\n"
                   . $this->graphiteLabels[$key]
@@ -187,8 +187,49 @@ class Grapher extends GrapherHook
                   . "</td>\n"
                   . "<tr>\n";
         }
-
         $html .= "</tbody></table>\n";
         return $html;
+    }
+
+    public function inlineImage($url) {
+        $ctx = stream_context_create(array('ssl' => array("verify_peer"=>$this->remoteVerifyPeer, "verify_peer_name"=>$this->remoteVerifyPeerName)));
+
+        $img = @file_get_contents($url, false, $ctx);
+        $error = error_get_last();
+        if ($error === null) {
+            return 'data:image/png;base64,'.base64_encode($img);
+        } else {
+            throw new \ErrorException($error['message']);
+        }
+    }
+
+    public function getRemoteFetch() {
+        return $this->remoteFetch;
+    }
+
+    public function getImgUrl($target) {
+        return $imgUrl = $this->baseUrl . Macro::resolveMacros($this->imageUrlMacro, array(
+            "target" => $target,
+            "areaMode" => $this->areaMode,
+            "areaAlpha" => $this->areaAlpha,
+            "colorList" => $this->colorList
+        ), $this->legacyMode);
+    }
+
+    public function getLargeImgUrl($target, $from=false, $xFormat = false) {
+        $url = $this->baseUrl . Macro::resolveMacros($this->largeImageUrlMacro, array(
+            "target" => $target,
+            "areaMode" => $this->areaMode,
+            "areaAlpha" => $this->areaAlpha,
+            "colorList" => $this->colorList
+        ), $this->legacyMode);
+        
+        if ($from !== false) {
+            $url = $url.'&from='.$from;
+        }
+        if ($xFormat !== false) {
+            $url = $url.'&xFormat='.$xFormat;
+        }
+        return $url;
     }
 }
